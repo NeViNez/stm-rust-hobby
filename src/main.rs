@@ -5,7 +5,8 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 use cortex_m_rt::entry;
-use stm32f4xx_hal::{pac, prelude::*, rcc::Config};
+use embedded_hal::digital::{InputPin, OutputPin};
+use stm32f4xx_hal::{pac, prelude::*, rcc::Config, timer::Counter};
 
 #[entry]
 fn main() -> ! {
@@ -26,31 +27,9 @@ fn main() -> ! {
 
     // Основной бесконечный цикл
     loop {
-        let start = timer.now().ticks();
-        dht.set_low();
-        while timer.now().ticks().wrapping_sub(start) < 20_000 {}
+        let cycle_start = timer.now().ticks();
 
-        let start2 = timer.now().ticks();
-        dht.set_high();
-
-        while dht.is_low() && timer.now().ticks().wrapping_sub(start2) < 100 {}
-
-        loop {
-            if dht.is_low() || timer.now().ticks().wrapping_sub(start2) > 100 {
-                break;
-            }
-        }
-
-        let t0 = timer.now().ticks();
-        while dht.is_low() && timer.now().ticks().wrapping_sub(t0) < 200 {}
-        let low_us = timer.now().ticks().wrapping_sub(t0);
-
-        let t1 = timer.now().ticks();
-        while dht.is_high() && timer.now().ticks().wrapping_sub(t1) < 200 {}
-        let high_us = timer.now().ticks().wrapping_sub(t1);
-
-        // Проверяем, поздоровался ли датчик
-        if low_us > 40 && low_us < 120 && high_us > 40 && high_us < 120 {
+        if dht_init_measure(&mut dht, &timer) {
             let mut data = [0u8; 5];
 
             for i in 0..5 {
@@ -84,6 +63,50 @@ fn main() -> ! {
         }
 
         // Даем датчику отдохнуть перед следующим циклом измерения
-        while timer.now().ticks().wrapping_sub(start2) < 2_000_000 {}
+        while timer.now().ticks().wrapping_sub(cycle_start) < 2_000_000 {}
+    }
+}
+
+fn dht_init_measure(dht: &mut (impl InputPin + OutputPin), timer: &impl MicrosTimer) -> bool {
+    // Инициализация последовательности измерения
+    let start = timer.now_us();
+    dht.set_low().unwrap();
+    while timer.now_us().wrapping_sub(start) < 20_000 {}
+
+    let start2 = timer.now_us();
+    dht.set_high().unwrap();
+
+    // После того, как отпустили линию, даем время подтяжке поднять линию
+    while dht.is_low().unwrap() && timer.now_us().wrapping_sub(start2) < 100 {}
+
+    // Ждем, пока датчик подтянет линию к низкому уровню
+    loop {
+        if dht.is_low().unwrap() || timer.now_us().wrapping_sub(start2) > 100 {
+            break;
+        }
+    }
+
+    let t0 = timer.now_us();
+    while dht.is_low().unwrap() && timer.now_us().wrapping_sub(t0) < 200 {}
+    let low_us = timer.now_us().wrapping_sub(t0);
+
+    let t1 = timer.now_us();
+    while dht.is_high().unwrap() && timer.now_us().wrapping_sub(t1) < 200 {}
+    let high_us = timer.now_us().wrapping_sub(t1);
+
+    if low_us > 40 && low_us < 120 && high_us > 40 && high_us < 120 {
+        true
+    } else {
+        false
+    }
+}
+
+trait MicrosTimer {
+    fn now_us(&self) -> u32;
+}
+
+impl<TIM: stm32f4xx_hal::timer::Instance> MicrosTimer for Counter<TIM, 1_000_000> {
+    fn now_us(&self) -> u32 {
+        self.now().ticks()
     }
 }
