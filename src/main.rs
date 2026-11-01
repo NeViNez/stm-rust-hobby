@@ -27,78 +27,37 @@ fn main() -> ! {
 
     // Основной бесконечный цикл
     loop {
-        let cycle_start = timer.now().ticks();
+        let cycle_start = timer.now_us();
 
         if dht_init_measure(&mut dht, &timer) {
-            let mut data = [0u8; 5];
-
-            for i in 0..5 {
-                let mut byte = 0u8;
-
-                for _ in 0..8 {
-                    let t2 = timer.now().ticks();
-                    while dht.is_low() && timer.now().ticks().wrapping_sub(t2) < 100 {}
-
-                    let t2 = timer.now().ticks();
-                    while dht.is_high() && timer.now().ticks().wrapping_sub(t2) < 150 {}
-
-                    let bit_us = timer.now().ticks().wrapping_sub(t2);
-                    byte = (byte << 1) | (bit_us >= 40) as u8;
-                }
-                data[i] = byte;
-            }
-
-            if data[0]
-                .wrapping_add(data[1])
-                .wrapping_add(data[2])
-                .wrapping_add(data[3])
-                == data[4]
-            {
-                defmt::info!("hum = {}%, temp = {}.{} C", data[0], data[2], data[3]);
-            } else {
-                defmt::warn!("DHT11: Ошибка контрольной суммы");
+            match dht_read_data(&mut dht, &timer) {
+                Some(d) => defmt::info!("hum = {}%, temp = {}.{} C", d[0], d[2], d[3]),
+                None => defmt::warn!("DHT11: Ошибка контрольной суммы"),
             }
         } else {
             defmt::warn!("DHT11: Ошибка связи с датчиком");
         }
 
         // Даем датчику отдохнуть перед следующим циклом измерения
-        while timer.now().ticks().wrapping_sub(cycle_start) < 2_000_000 {}
+        while timer.now_us().wrapping_sub(cycle_start) < 100_000_000 {}
     }
 }
 
 fn dht_init_measure(dht: &mut (impl InputPin + OutputPin), timer: &impl MicrosTimer) -> bool {
-    // Инициализация последовательности измерения
-    let start = timer.now_us();
+    // Стартовый импульс: 20 мс низкого уровня
     dht.set_low().unwrap();
-    while timer.now_us().wrapping_sub(start) < 20_000 {}
-
-    let start2 = timer.now_us();
+    wait_while(timer, 20_000, || true);
     dht.set_high().unwrap();
 
-    // После того, как отпустили линию, даем время подтяжке поднять линию
-    while dht.is_low().unwrap() && timer.now_us().wrapping_sub(start2) < 100 {}
+    // Подтяжка поднимает линию, затем датчик тянет её к низкому уровню
+    wait_while(timer, 100, || dht.is_low().unwrap());
+    wait_while(timer, 100, || dht.is_high().unwrap());
 
-    // Ждем, пока датчик подтянет линию к низкому уровню
-    loop {
-        if dht.is_low().unwrap() || timer.now_us().wrapping_sub(start2) > 100 {
-            break;
-        }
-    }
+    // Ответ датчика: ~80 мкс низкий, ~80 мкс высокий
+    let low_us = wait_while(timer, 200, || dht.is_low().unwrap());
+    let high_us = wait_while(timer, 200, || dht.is_high().unwrap());
 
-    let t0 = timer.now_us();
-    while dht.is_low().unwrap() && timer.now_us().wrapping_sub(t0) < 200 {}
-    let low_us = timer.now_us().wrapping_sub(t0);
-
-    let t1 = timer.now_us();
-    while dht.is_high().unwrap() && timer.now_us().wrapping_sub(t1) < 200 {}
-    let high_us = timer.now_us().wrapping_sub(t1);
-
-    if low_us > 40 && low_us < 120 && high_us > 40 && high_us < 120 {
-        true
-    } else {
-        false
-    }
+    (41..120).contains(&low_us) && (41..120).contains(&high_us)
 }
 
 trait MicrosTimer {
@@ -109,4 +68,38 @@ impl<TIM: stm32f4xx_hal::timer::Instance> MicrosTimer for Counter<TIM, 1_000_000
     fn now_us(&self) -> u32 {
         self.now().ticks()
     }
+}
+
+/// Читает 5 байт и проверяет контрольную сумму. None — сумма не сошлась.
+fn dht_read_data(dht: &mut impl InputPin, timer: &impl MicrosTimer) -> Option<[u8; 5]> {
+    let mut data = [0u8; 5];
+    for b in data.iter_mut() {
+        *b = dht_read_byte(dht, timer);
+    }
+    let sum = data[0]
+        .wrapping_add(data[1])
+        .wrapping_add(data[2])
+        .wrapping_add(data[3]);
+    (sum == data[4]).then_some(data)
+}
+
+fn dht_read_byte(dht: &mut impl InputPin, timer: &impl MicrosTimer) -> u8 {
+    let mut byte = 0u8;
+    for _ in 0..8 {
+        byte = (byte << 1) | dht_read_bit(dht, timer) as u8;
+    }
+    byte
+}
+
+/// Бит: низкий уровень (~50 мкс), затем высокий: ~26 мкс = 0, ~70 мкс = 1.
+fn dht_read_bit(dht: &mut impl InputPin, timer: &impl MicrosTimer) -> bool {
+    wait_while(timer, 100, || dht.is_low().unwrap());
+    let high_us = wait_while(timer, 150, || dht.is_high().unwrap());
+    high_us >= 40
+}
+
+fn wait_while(timer: &impl MicrosTimer, timeout_us: u32, mut cond: impl FnMut() -> bool) -> u32 {
+    let start = timer.now_us();
+    while cond() && timer.now_us().wrapping_sub(start) < timeout_us {}
+    timer.now_us().wrapping_sub(start)
 }
