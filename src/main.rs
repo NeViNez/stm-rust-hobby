@@ -21,9 +21,6 @@ fn main() -> ! {
     let mut dht = gpioa.pa0.into_open_drain_output();
     dht.set_high();
 
-    // PA5 - светодиод
-    let mut led = gpioa.pa5.into_push_pull_output();
-
     let mut timer = dp.TIM5.counter_us(&mut rcc);
     timer.start(u32::MAX.micros()).unwrap();
 
@@ -67,14 +64,6 @@ fn main() -> ! {
                     while dht.is_high() && timer.now().ticks().wrapping_sub(t2) < 150 {}
 
                     let bit_us = timer.now().ticks().wrapping_sub(t2);
-                    if bit_us < 40 {
-                        // 0
-                        led.set_high();
-                    } else {
-                        // 1
-                        led.set_low();
-                    }
-
                     byte = (byte << 1) | (bit_us >= 40) as u8;
                 }
                 data[i] = byte;
@@ -91,9 +80,6 @@ fn main() -> ! {
                 defmt::warn!("DHT11: Ошибка контрольной суммы");
             }
         } else {
-            // 0
-            led.set_low();
-
             defmt::warn!("DHT11: Ошибка связи с датчиком");
         }
 
